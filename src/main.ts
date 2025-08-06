@@ -10,11 +10,14 @@ await app.init({
 document.body.appendChild(app.canvas);
 
 new PixiPerfOverlay(app)
+const asset = "https://images.voidgame.io/skins/mp4/meme/peepo.mp4"
+// await Assets.load('https://pixijs.com/assets/bunny.png');
+// const texture = Assets.get('https://pixijs.com/assets/bunny.png')
 
-await Assets.load('https://pixijs.com/assets/bunny.png');
-const texture = Assets.get('https://pixijs.com/assets/bunny.png')
+await Assets.load(asset)
+const texture = Assets.get(asset)
 
-const circles = Array.from({length: 30}).map(() => {
+const circles = Array.from({length: 100}).map(() => {
   const rand = Math.random()*200;
   const staticCircle =  new CircleMesh({ texture, mode: 'static',size: {width: rand, height: rand} });
   staticCircle.x = rand;

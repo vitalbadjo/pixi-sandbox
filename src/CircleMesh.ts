@@ -8,68 +8,91 @@ import {
 export type CircleMeshMode = 'static' | 'jelly';
 
 const vertexSrc = `
-            in vec2 aPosition;
-            in vec2 aUV;
+    in vec2 aPosition;
+    in vec2 aUV;
 
-            out vec2 vUV;
+    out vec2 vUV;
 
-            uniform mat3 uProjectionMatrix;
-            uniform mat3 uWorldTransformMatrix;
-            uniform mat3 uTransformMatrix;
+    uniform mat3 uProjectionMatrix;
+    uniform mat3 uWorldTransformMatrix;
+    uniform mat3 uTransformMatrix;
 
-            void main() {
-                mat3 mvp = uProjectionMatrix * uWorldTransformMatrix * uTransformMatrix;
-                gl_Position = vec4((mvp * vec3(aPosition, 1.0)).xy, 0.0, 1.0);
-                vUV = aUV;
-            }
-        `;
+    void main() {
+        mat3 mvp = uProjectionMatrix * uWorldTransformMatrix * uTransformMatrix;
+        gl_Position = vec4((mvp * vec3(aPosition, 1.0)).xy, 0.0, 1.0);
+        vUV = aUV;
+    }
+`;
 
 const fragmentSrc = `
-            in vec2 vUV;
-            uniform sampler2D uTexture;
-            uniform vec2 uCenter;
-            uniform float uRadius;
+    in vec2 vUV;
+    uniform sampler2D uTexture;
+    uniform vec2 uCenter;
+    uniform float uRadius;
 
-            void main() {
-                vec4 color = texture(uTexture, vUV);
-                float dist = distance(vUV, uCenter);
-                if (dist > uRadius) discard;
-                gl_FragColor = color;
-            }
-        `;
-
-const geometrySize = 500;
-const sharedCircleGeometry = new Geometry({
-      attributes: {
-        aPosition: new Float32Array([
-          0, 0,
-          geometrySize, 0,
-          geometrySize, geometrySize,
-          0, geometrySize
-        ]),
-        aUV: new Float32Array([
-          0, 0,
-          1, 0,
-          1, 1,
-          0, 1
-        ])
-      },
-      indexBuffer: [0, 1, 2, 0, 2, 3]
+    void main() {
+        vec4 color = texture(uTexture, vUV);
+        float dist = distance(vUV, uCenter);
+        if (dist > uRadius) discard;
+        gl_FragColor = color;
     }
-);
+`;
+
+// Размер базовой геометрии (масштабируем в setSize)
+const geometrySize = 500;
+
+// Общая геометрия для static окружностей
+const sharedCircleGeometry = new Geometry({
+  attributes: {
+    aPosition: new Float32Array([
+      0, 0,
+      geometrySize, 0,
+      geometrySize, geometrySize,
+      0, geometrySize
+    ]),
+    aUV: new Float32Array([
+      0, 0,
+      1, 0,
+      1, 1,
+      0, 1
+    ])
+  },
+  indexBuffer: [0, 1, 2, 0, 2, 3]
+});
+
+// Кэш шейдеров по texture.uid
+const shaderCache = new Map<number, Shader>();
+
+function getOrCreateStaticShader(texture: Texture): Shader {
+  const uid = texture.uid;
+  if (shaderCache.has(uid)) {
+    return shaderCache.get(uid)!;
+  }
+
+  const shader = Shader.from({
+    gl: { vertex: vertexSrc, fragment: fragmentSrc },
+    resources: {
+      uTexture: texture.source,
+      waveUniforms: {
+        uCenter: { value: new Float32Array([0.5, 0.5]), type: 'vec2<f32>' },
+        uRadius: { value: 0.5, type: 'f32' }
+      }
+    }
+  });
+
+  shaderCache.set(uid, shader);
+  return shader;
+}
 
 export class CircleMesh extends Mesh<Geometry, Shader> {
-  private static shaderCache = new Map<string, Shader>();
-
-   mode: CircleMeshMode;
-   baseTexture: Texture;
-  shaderKey: string;
+  mode: CircleMeshMode;
+  baseTexture: Texture;
 
   constructor(options: {
     texture: Texture;
-    mode: CircleMeshMode;
+    mode?: CircleMeshMode;
     verticesCount?: number;
-    size: { width: number; height: number };
+    size?: { width: number; height: number };
   }) {
     const {
       texture,
@@ -79,31 +102,33 @@ export class CircleMesh extends Mesh<Geometry, Shader> {
     } = options;
 
     let geometry: Geometry;
-    let shaderKey: string;
+    let shader: Shader;
 
     if (mode === 'static') {
-      geometry = CircleMesh.getOrCreateQuadGeometry();
+      geometry = sharedCircleGeometry;
+      shader = getOrCreateStaticShader(texture);
     } else {
       geometry = CircleMesh.createCircleGeometry(size.width / 2, verticesCount);
+      shader = Shader.from({
+        gl: { vertex: vertexSrc, fragment: fragmentSrc },
+        resources: {
+          uTexture: texture.source,
+          waveUniforms: {
+            uCenter: { value: new Float32Array([0.5, 0.5]), type: 'vec2<f32>' },
+            uRadius: { value: 0.5, type: 'f32' }
+          }
+        }
+      });
     }
-console.log("texture.uid",texture.uid)
-    shaderKey = `${texture.uid}`;
-    const shader = CircleMesh.getOrCreateShader(texture);
 
     super({ geometry, shader });
-
     this.setSize(size.width, size.height);
 
-    this.mode = options.mode;
+    this.mode = mode;
     this.baseTexture = texture;
-    this.shaderKey = shaderKey;
   }
 
-  private static getOrCreateQuadGeometry = () =>  {
-    return sharedCircleGeometry;
-  }
-
-  /** Круглая геометрия для jelly */
+  /** Геометрия круга для jelly */
   private static createCircleGeometry(radius: number, segments: number): Geometry {
     const verts: number[] = [0, 0];
     const uvs: number[] = [0.5, 0.5];
@@ -131,28 +156,13 @@ console.log("texture.uid",texture.uid)
     });
   }
 
-  /** Кэш шейдеров */
-  private static getOrCreateShader(texture: Texture): Shader {
-    const key = `${texture.uid}`;
-    if (this.shaderCache.has(key)) return this.shaderCache.get(key)!;
-
-    const shader = Shader.from({
-      gl: { vertex: vertexSrc, fragment: fragmentSrc },
-      resources: {
-        uTexture: texture.source,
-        waveUniforms: {
-          uCenter: { value: new Float32Array([0.5, 0.5]), type: 'vec2<f32>' },
-          uRadius: { value: 0.5, type: 'f32' }
-        }
-      }
-    });
-
-    this.shaderCache.set(key, shader);
-    return shader;
-  }
-
   setTexture(texture: Texture) {
-    // this.baseTexture = texture;
-    if (this.shader) this.shader.resources.uTexture = texture.source;
+    if (this.mode === 'static') {
+      // Для static всегда должен быть общий шейдер
+      this.shader = getOrCreateStaticShader(texture);
+    } else {
+      if (this.shader)this.shader.resources.uTexture = texture.source;
+    }
+    this.baseTexture = texture;
   }
 }
