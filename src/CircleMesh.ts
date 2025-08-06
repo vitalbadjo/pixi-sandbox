@@ -38,10 +38,8 @@ const fragmentSrc = `
     }
 `;
 
-// Размер базовой геометрии (масштабируем в setSize)
 const geometrySize = 500;
 
-// Общая геометрия для static окружностей
 const sharedCircleGeometry = new Geometry({
   attributes: {
     aPosition: new Float32Array([

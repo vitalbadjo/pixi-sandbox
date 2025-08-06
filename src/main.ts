@@ -36,7 +36,6 @@ app.ticker.add(() => {
   })
 })
 
-// Jelly круг (много сегментов)
 // const jellyCircle = new CircleMesh({ texture, mode: 'jelly', verticesCount: 64, size: {width: 100, height: 100} });
 // jellyCircle.x = 300;
 // jellyCircle.y = 100;
