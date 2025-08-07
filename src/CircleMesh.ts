@@ -38,6 +38,71 @@ const fragmentSrc = `
     }
 `;
 
+const gpuSource = `
+
+struct GlobalUniforms {
+    uProjectionMatrix:mat3x3<f32>,
+    uWorldTransformMatrix:mat3x3<f32>,
+}
+
+struct LocalUniforms {
+    uTransformMatrix:mat3x3<f32>,
+}
+
+@group(0) @binding(0) var<uniform> globalUniforms : GlobalUniforms;
+@group(1) @binding(0) var<uniform> localUniforms : LocalUniforms;
+
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) vUV: vec2<f32>,
+};
+
+@vertex
+fn mainVert(
+    @location(0) aPosition : vec2<f32>,
+    @location(1) aUV : vec2<f32>,
+) -> VertexOutput {
+    var output: VertexOutput;
+    let mvp = globalUniforms.uProjectionMatrix * globalUniforms.uWorldTransformMatrix * localUniforms.uTransformMatrix;
+    let pos = vec4<f32>(mvp * vec3<f32>(aPosition, 1.0), 1.0);
+    output.position = vec4<f32>(pos.xy, 0.0, 1.0);
+    output.vUV = aUV;
+    
+    return output;
+}
+
+struct WaveUniforms {
+    uCenter: vec2<f32>,
+    uRadius: f32,
+};
+
+
+@group(2) @binding(1) var uTexture : texture_2d<f32>;
+@group(2) @binding(2) var uSampler : sampler;
+@group(2) @binding(3) var<uniform> waveUniforms: WaveUniforms;
+
+@fragment
+fn mainFrag(@location(0) vUV: vec2<f32>) -> @location(0) vec4<f32> {
+    let dist = distance(vUV, waveUniforms.uCenter);
+    if (dist > waveUniforms.uRadius) {
+        discard;
+    }
+    let color = textureSample(uTexture, uSampler, vUV);
+    return color;
+}
+`
+
+const gpu = {
+  vertex: {
+    entryPoint: 'mainVert',
+    source: gpuSource,
+  },
+  fragment: {
+    entryPoint: 'mainFrag',
+    source: gpuSource,
+  },
+};
+
 const geometrySize = 500;
 
 const sharedCircleGeometry = new Geometry({
@@ -69,8 +134,10 @@ function getOrCreateStaticShader(texture: Texture): Shader {
 
   const shader = Shader.from({
     gl: { vertex: vertexSrc, fragment: fragmentSrc },
+    gpu,
     resources: {
       uTexture: texture.source,
+      uSampler: texture.source.style,
       waveUniforms: {
         uCenter: { value: new Float32Array([0.5, 0.5]), type: 'vec2<f32>' },
         uRadius: { value: 0.5, type: 'f32' }
@@ -107,19 +174,11 @@ export class CircleMesh extends Mesh<Geometry, Shader> {
       shader = getOrCreateStaticShader(texture);
     } else {
       geometry = CircleMesh.createCircleGeometry(size.width / 2, verticesCount);
-      shader = Shader.from({
-        gl: { vertex: vertexSrc, fragment: fragmentSrc },
-        resources: {
-          uTexture: texture.source,
-          waveUniforms: {
-            uCenter: { value: new Float32Array([0.5, 0.5]), type: 'vec2<f32>' },
-            uRadius: { value: 0.5, type: 'f32' }
-          }
-        }
-      });
+      shader = getOrCreateStaticShader(texture);
     }
 
     super({ geometry, shader });
+    // this.enableRenderGroup();
     this.setSize(size.width, size.height);
 
     this.mode = mode;

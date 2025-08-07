@@ -5,7 +5,7 @@ import { PixiPerfOverlay } from './stats';
 const app = new Application();
 await app.init({
   resizeTo: window,
-  preference: 'webgl',
+  preference: 'webgpu',
 });
 document.body.appendChild(app.canvas);
 
