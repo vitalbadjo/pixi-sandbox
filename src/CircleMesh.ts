@@ -8,38 +8,51 @@ import {
 export type CircleMeshMode = 'static' | 'jelly';
 
 const vertexSrc = `
-    in vec2 aPosition;
-    in vec2 aUV;
+in vec2 aPosition;
+in vec2 aUV;
 
-    out vec2 vUV;
+out vec2 vUV;
 
-    uniform mat3 uProjectionMatrix;
-    uniform mat3 uWorldTransformMatrix;
-    uniform mat3 uTransformMatrix;
+uniform mat3 uProjectionMatrix;
+uniform mat3 uWorldTransformMatrix;
+uniform mat3 uTransformMatrix;
 
-    void main() {
-        mat3 mvp = uProjectionMatrix * uWorldTransformMatrix * uTransformMatrix;
-        gl_Position = vec4((mvp * vec3(aPosition, 1.0)).xy, 0.0, 1.0);
-        vUV = aUV;
-    }
+void main() {
+    mat3 mvp = uProjectionMatrix * uWorldTransformMatrix * uTransformMatrix;
+    gl_Position = vec4((mvp * vec3(aPosition, 1.0)).xy, 0.0, 1.0);
+    vUV = aUV;
+}
 `;
 
-const fragmentSrc = `
-    in vec2 vUV;
-    uniform sampler2D uTexture;
-    uniform vec2 uCenter;
-    uniform float uRadius;
+const fragmentSrcBase = `
+in vec2 vUV;
 
-    void main() {
-        vec4 color = texture(uTexture, vUV);
-        float dist = distance(vUV, uCenter);
-        if (dist > uRadius) discard;
-        gl_FragColor = color;
-    }
+uniform sampler2D uTexture;
+uniform vec2 uCenter;
+uniform float uRadius;
 `;
 
-const gpuSource = `
+const fragmentSrcOverlay = `
+uniform sampler2D uOverlay;
+uniform vec4 uOverlayColor;
+`;
 
+const fragmentSrcMain = `
+void main() {
+    vec4 base = texture2D(uTexture, vUV);
+    float dist = distance(vUV, uCenter);
+    if (dist > uRadius) discard;
+    __OVERLAY_BLOCK__
+    gl_FragColor = base;
+}
+`;
+
+const fragmentOverlayCode = `
+    vec4 overlay = texture2D(uOverlay, vUV) * uOverlayColor;
+    base = mix(base, overlay, overlay.a);
+`;
+
+const gpuSourceBase = `
 struct GlobalUniforms {
     uProjectionMatrix:mat3x3<f32>,
     uWorldTransformMatrix:mat3x3<f32>,
@@ -67,19 +80,14 @@ fn mainVert(
     let pos = vec4<f32>(mvp * vec3<f32>(aPosition, 1.0), 1.0);
     output.position = vec4<f32>(pos.xy, 0.0, 1.0);
     output.vUV = aUV;
-    
     return output;
 }
+`;
 
-struct WaveUniforms {
-    uCenter: vec2<f32>,
-    uRadius: f32,
-};
-
-
-@group(2) @binding(1) var uTexture : texture_2d<f32>;
-@group(2) @binding(2) var uSampler : sampler;
+const gpuFragmentOverlay = `
+@group(2) @binding(2) var uOverlay : texture_2d<f32>;
 @group(2) @binding(3) var<uniform> waveUniforms: WaveUniforms;
+@group(2) @binding(4) var uSampler : sampler;
 
 @fragment
 fn mainFrag(@location(0) vUV: vec2<f32>) -> @location(0) vec4<f32> {
@@ -87,21 +95,26 @@ fn mainFrag(@location(0) vUV: vec2<f32>) -> @location(0) vec4<f32> {
     if (dist > waveUniforms.uRadius) {
         discard;
     }
-    let color = textureSample(uTexture, uSampler, vUV);
-    return color;
+    var base = textureSample(uTexture, uSampler, vUV);
+    let overlay = textureSample(uOverlay, uSampler, vUV) * waveUniforms.uOverlayColor;
+    base = mix(base, overlay, overlay.a);
+    return base;
 }
-`
+`;
 
-const gpu = {
-  vertex: {
-    entryPoint: 'mainVert',
-    source: gpuSource,
-  },
-  fragment: {
-    entryPoint: 'mainFrag',
-    source: gpuSource,
-  },
-};
+const gpuFragmentBase = `
+@group(2) @binding(2) var<uniform> waveUniforms: WaveUniforms;
+@group(2) @binding(3) var uSampler : sampler;
+
+@fragment
+fn mainFrag(@location(0) vUV: vec2<f32>) -> @location(0) vec4<f32> {
+    let dist = distance(vUV, waveUniforms.uCenter);
+    if (dist > waveUniforms.uRadius) {
+        discard;
+    }
+    return textureSample(uTexture, uSampler, vUV);
+}
+`;
 
 const geometrySize = 500;
 
@@ -123,44 +136,76 @@ const sharedCircleGeometry = new Geometry({
   indexBuffer: [0, 1, 2, 0, 2, 3]
 });
 
-// Кэш шейдеров по texture.uid
-const shaderCache = new Map<number, Shader>();
+const shaderCache = new Map<string, Shader>();
 
-function getOrCreateStaticShader(texture: Texture): Shader {
-  const uid = texture.uid;
-  if (shaderCache.has(uid)) {
-    return shaderCache.get(uid)!;
+function getOrCreateStaticShader(texture: Texture, overlay?: Texture, color?: Float32Array): Shader {
+  const hasOverlay = !!overlay;
+  const colorKey = color ? Array.from(color).join(',') : '';
+  const key = `${texture.uid}:${overlay?.uid ?? 'none'}:${colorKey}`;
+
+  if (shaderCache.has(key)) {
+    return shaderCache.get(key)!;
+  }
+
+  const fragmentSrc = [
+    fragmentSrcBase,
+    hasOverlay ? fragmentSrcOverlay : '',
+    fragmentSrcMain.replace('__OVERLAY_BLOCK__', hasOverlay ? fragmentOverlayCode : '')
+  ].join('\n');
+
+  const gpu = {
+    vertex: {
+      entryPoint: 'mainVert',
+      source: gpuSourceBase,
+    },
+    fragment: {
+      entryPoint: 'mainFrag',
+      source: gpuSourceBase + (hasOverlay ? gpuFragmentOverlay : gpuFragmentBase),
+    }
+  };
+
+  const resources: any = {
+    uTexture: texture.source,
+    uSampler: texture.source.style,
+    waveUniforms: {
+      uCenter: { value: new Float32Array([0.5, 0.5]), type: 'vec2<f32>' },
+      uRadius: { value: 0.5, type: 'f32' }
+    }
+  };
+
+  if (hasOverlay) {
+    resources.uOverlay = overlay!.source;
+    resources.waveUniforms.uOverlayColor = { value: color ?? new Float32Array([1, 1, 1, 1]), type: 'vec4<f32>' };
   }
 
   const shader = Shader.from({
     gl: { vertex: vertexSrc, fragment: fragmentSrc },
     gpu,
-    resources: {
-      uTexture: texture.source,
-      uSampler: texture.source.style,
-      waveUniforms: {
-        uCenter: { value: new Float32Array([0.5, 0.5]), type: 'vec2<f32>' },
-        uRadius: { value: 0.5, type: 'f32' }
-      }
-    }
+    resources
   });
 
-  shaderCache.set(uid, shader);
+  shaderCache.set(key, shader);
   return shader;
 }
 
 export class CircleMesh extends Mesh<Geometry, Shader> {
   mode: CircleMeshMode;
   baseTexture: Texture;
+  overlayTexture?: Texture;
+  overlayColor: Float32Array;
 
   constructor(options: {
     texture: Texture;
+    overlay?: Texture;
+    overlayColor?: Float32Array;
     mode?: CircleMeshMode;
     verticesCount?: number;
     size?: { width: number; height: number };
   }) {
     const {
       texture,
+      overlay,
+      overlayColor = new Float32Array([1, 1, 1, 1]),
       mode = 'static',
       verticesCount = 64,
       size = { width: texture.width, height: texture.height }
@@ -171,21 +216,21 @@ export class CircleMesh extends Mesh<Geometry, Shader> {
 
     if (mode === 'static') {
       geometry = sharedCircleGeometry;
-      shader = getOrCreateStaticShader(texture);
     } else {
       geometry = CircleMesh.createCircleGeometry(size.width / 2, verticesCount);
-      shader = getOrCreateStaticShader(texture);
     }
 
+    shader = getOrCreateStaticShader(texture, overlay, overlayColor);
+
     super({ geometry, shader });
-    // this.enableRenderGroup();
     this.setSize(size.width, size.height);
 
     this.mode = mode;
     this.baseTexture = texture;
+    this.overlayTexture = overlay;
+    this.overlayColor = overlayColor;
   }
 
-  /** Геометрия круга для jelly */
   private static createCircleGeometry(radius: number, segments: number): Geometry {
     const verts: number[] = [0, 0];
     const uvs: number[] = [0.5, 0.5];
@@ -213,13 +258,18 @@ export class CircleMesh extends Mesh<Geometry, Shader> {
     });
   }
 
-  setTexture(texture: Texture) {
-    if (this.mode === 'static') {
-      // Для static всегда должен быть общий шейдер
-      this.shader = getOrCreateStaticShader(texture);
-    } else {
-      if (this.shader)this.shader.resources.uTexture = texture.source;
-    }
+  setOverlayColor(r: number, g: number, b: number, a: number = 1) {
+    if (!this.overlayTexture) return;
+
+    const newColor = new Float32Array([r, g, b, a]);
+    this.shader = getOrCreateStaticShader(this.baseTexture, this.overlayTexture, newColor);
+    this.overlayColor = newColor;
+  }
+
+  setTexture(texture: Texture, overlay?: Texture, overlayColor?: Float32Array) {
     this.baseTexture = texture;
+    this.overlayTexture = overlay;
+    this.overlayColor = overlayColor ?? this.overlayColor;
+    this.shader = getOrCreateStaticShader(texture, overlay, this.overlayColor);
   }
 }
